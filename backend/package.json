@@ -1,0 +1,31 @@
+{
+  "name": "agriverse360-backend",
+  "version": "1.0.0",
+  "description": "Backend API for Agriverse360 agricultural monitoring system",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "nodemon src/index.js",
+    "test": "jest"
+  },
+  "dependencies": {
+    "express": "^4.18.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.0.0",
+    "mongoose": "^6.5.0",
+    "bcryptjs": "^2.4.3",
+    "jsonwebtoken": "^8.5.1"
+  },
+  "devDependencies": {
+    "nodemon": "^2.0.15",
+    "jest": "^28.0.0"
+  },
+  "keywords": [
+    "agriculture",
+    "iot",
+    "api",
+    "backend"
+  ],
+  "author": "Agriverse360 Team",
+  "license": "MIT"
+}
