@@ -1,6 +1,6 @@
 # Dependency folders
 node_modules/
-dist/
+**/node_modules/
 
 # Environment
 .env
@@ -11,3 +11,6 @@ dist/
 
 # Log files
 *.log
+
+#VS code
+.vscode/
