@@ -1,1 +1,13 @@
-node_modules
+# Dependency folders
+node_modules/
+dist/
+
+# Environment
+.env
+
+# Editor folders
+.vscode/
+.DS_Store
+
+# Log files
+*.log
