@@ -19,4 +19,4 @@ dist/
 *.log
 
 #VS code
-.vscode/
+.vscode/ml_env/
