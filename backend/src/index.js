@@ -1,3 +1,6 @@
+// index.js (modified)
+// Agriverse360 backend entrypoint with WS + MQTT bridge integration
+
 const express = require('express');
 const cors = require('cors');
 const dotenv = require('dotenv');
@@ -6,6 +9,13 @@ const path = require('path');
 const axios = require('axios');
 const mockMLService = require('./mockMLService');
 const { connectDB, disconnectDB } = require('./config/database');
+const mongoose = require('mongoose'); // used in health check
+
+// --- New additions for WS + MQTT bridge ---
+const http = require('http');
+const startWs = require('./wsServer');         // should export a function that returns { wss, broadcast }
+const { start: startMqttBridge } = require('./mqttBridge'); // should export start(...)
+                                                            // ------------------------------------------------
 
 // Load environment variables
 dotenv.config();
@@ -18,7 +28,13 @@ let mlServiceProcess = null;
 const ML_SERVICE_PATH = path.join(__dirname, '../../ml_service/app.py');
 const ML_SERVICE_PORT = 5004;
 
-// Function to start ML service
+// MQTT bridge instance (bridge object returned by startMqttBridge)
+let mqttBridgeInstance = null;
+
+// last known telemetry (stringified envelope or object) - sent to new WS clients
+let lastTelemetry = null;
+
+// Function to start ML service (unchanged from your code)
 function startMLService() {
   console.log('🚀 Starting ML Service...');
 
@@ -149,7 +165,14 @@ function startMockMLService() {
 function stopMLService() {
   if (mlServiceProcess) {
     console.log('🛑 Stopping ML Service...');
-    mlServiceProcess.kill('SIGTERM');
+    try {
+      // if spawned process
+      if (typeof mlServiceProcess.kill === 'function') mlServiceProcess.kill('SIGTERM');
+      // if mock server object with close
+      if (mlServiceProcess.close) mlServiceProcess.close();
+    } catch (err) {
+      console.warn('⚠️ Error stopping ML service:', err);
+    }
     mlServiceProcess = null;
   }
 }
@@ -175,9 +198,9 @@ app.get('/health', async (req, res) => {
   try {
     const mlResponse = await axios.get(`http://localhost:${ML_SERVICE_PORT}/health`, { timeout: 3000 });
     health.services.ml_service = 'running';
-    health.services.disease_detection = mlResponse.data.services.disease_detection;
-    health.services.nutrient_analysis = mlResponse.data.services.nutrient_analysis;
-    health.services.plant_info_ml = mlResponse.data.services.plant_info;
+    health.services.disease_detection = mlResponse.data.services?.disease_detection ?? 'unknown';
+    health.services.nutrient_analysis = mlResponse.data.services?.nutrient_analysis ?? 'unknown';
+    health.services.plant_info_ml = mlResponse.data.services?.plant_info ?? 'unknown';
   } catch (error) {
     health.services.ml_service = 'not responding';
     health.services.disease_detection = 'unknown';
@@ -187,14 +210,13 @@ app.get('/health', async (req, res) => {
 
   // Check Database connection
   try {
-    health.services.database = mongoose.connection.readyState === 1 ? 'connected' : 'disconnected';
+    health.services.database = mongoose.connection && mongoose.connection.readyState === 1 ? 'connected' : 'disconnected';
   } catch (error) {
     health.services.database = 'error';
   }
 
   // Check Plant Info API (OpenAI/ChatGPT)
   try {
-    // Simple check - we don't want to waste API calls
     health.services.plant_info_api = process.env.OPENAI_API_KEY ? 'configured' : 'not configured';
   } catch (error) {
     health.services.plant_info_api = 'error';
@@ -267,14 +289,69 @@ const plantRoutes = require('./routes/plant');
 app.use('/api', uploadRoutes);
 app.use('/api/plant', plantRoutes);
 
-// Connect to database and start server
+// --- New: build HTTP server and attach WS + MQTT bridge (keeps same PORT) ---
 const startServer = async () => {
   try {
     // Connect to MongoDB
     await connectDB();
 
-    // Start the server
-    app.listen(PORT, () => {
+    // create http server from express app so we can attach ws
+    const server = http.createServer(app);
+
+    // start websocket server attached to the same http server
+    // startWs should return { wss, broadcast }
+    const { wss, broadcast } = startWs(server, { path: '/ws' });
+
+    // when a ws client connects, send lastTelemetry immediately (if present)
+    if (wss && wss.on) {
+      wss.on('connection', (socket, req) => {
+        try {
+          const addr = req.socket ? req.socket.remoteAddress : 'unknown';
+          console.log('[ws] client connected', addr);
+          if (lastTelemetry) {
+            // send lastTelemetry as an envelope
+            socket.send(typeof lastTelemetry === 'string' ? lastTelemetry : JSON.stringify(lastTelemetry));
+          }
+          socket.on('close', () => {
+            console.log('[ws] client disconnected', addr);
+          });
+        } catch (err) {
+          console.warn('[ws] connection handler error', err && err.message);
+        }
+      });
+    }
+
+    // start mqtt bridge - it will subscribe to esp32/telemetry and broadcast envelopes to ws via broadcast()
+    const MQTT_URL = process.env.MQTT_URL || 'mqtt://10.1.1.113:1883';
+    const MQTT_USER = process.env.MQTT_USER || 'esp32com';
+    const MQTT_PASS = process.env.MQTT_PASS || 'esp32aug';
+
+    try {
+      // startMqttBridge is expected to return an object with .stop() and .client references
+      mqttBridgeInstance = startMqttBridge({
+        mqttUrl: MQTT_URL,
+        mqttUser: MQTT_USER,
+        mqttPass: MQTT_PASS,
+        topics: ['esp32/telemetry'],
+        wsBroadcast: (msgStr) => {
+          // store last telemetry and broadcast to ws clients
+          try {
+            lastTelemetry = typeof msgStr === 'string' ? msgStr : JSON.stringify(msgStr);
+            broadcast(msgStr);
+          } catch (err) {
+            console.error('[mqttBridge->ws] broadcast error', err && err.message);
+          }
+        }
+      });
+
+      console.log('🔌 MQTT bridge created');
+    } catch (err) {
+      console.error('❌ Failed to create MQTT bridge:', err && err.message);
+      mqttBridgeInstance = null;
+    }
+
+    // Start the HTTP+WS server on the same PORT (unchanged)
+    server.listen(PORT, () => {
       console.log(`🌱 Agriverse360 Backend Server running on port ${PORT}`);
       console.log(`📊 Health check: http://localhost:${PORT}/health`);
       console.log(`📋 Status page: http://localhost:${PORT}/status`);
@@ -292,11 +369,11 @@ const startServer = async () => {
         }
       }, 10000);
 
-      // Periodic health checks
+      // Periodic health checks for ML service
       setInterval(async () => {
         try {
-          const response = await axios.get(`http://localhost:${ML_SERVICE_PORT}/health`, { timeout: 2000 });
-          // ML service is healthy, no need to log every time
+          await axios.get(`http://localhost:${ML_SERVICE_PORT}/health`, { timeout: 2000 });
+          // ML service healthy
         } catch (error) {
           console.log('⚠️  ML Service health check failed - service may be restarting...');
         }
@@ -304,27 +381,53 @@ const startServer = async () => {
     });
 
   } catch (error) {
-    console.error('❌ Failed to start server:', error.message);
+    console.error('❌ Failed to start server:', error && error.message);
     process.exit(1);
   }
 };
 
-// Start the server
+// Start server
 startServer();
 
 // Graceful shutdown
-process.on('SIGINT', async () => {
-  console.log('\n🛑 Received SIGINT, shutting down gracefully...');
+async function gracefulShutdown(codeSignal) {
+  console.log(`\n🛑 Received ${codeSignal}, shutting down gracefully...`);
   stopMLService();
-  await disconnectDB();
-  process.exit(0);
-});
 
-process.on('SIGTERM', async () => {
-  console.log('\n🛑 Received SIGTERM, shutting down gracefully...');
-  stopMLService();
-  await disconnectDB();
-  process.exit(0);
-});
+  try {
+    if (mqttBridgeInstance && typeof mqttBridgeInstance.stop === 'function') {
+      console.log('🔌 Stopping MQTT bridge...');
+      mqttBridgeInstance.stop();
+    } else if (mqttBridgeInstance && mqttBridgeInstance.client && typeof mqttBridgeInstance.client.end === 'function') {
+      console.log('🔌 Closing MQTT client...');
+      mqttBridgeInstance.client.end(true);
+    }
+  } catch (err) {
+    console.warn('⚠️ Error closing mqtt bridge/client:', err && err.message);
+  }
 
-module.exports = app;
+  try {
+    await disconnectDB();
+  } catch (err) {
+    console.warn('⚠️ Error disconnecting DB:', err && err.message);
+  }
+
+  // allow short delay for clean close
+  setTimeout(() => process.exit(0), 500);
+}
+
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+
+// export app and mqtt client getter for other modules if needed
+module.exports = {
+  app,
+  mqttClient: () => {
+    try {
+      if (!mqttBridgeInstance) return null;
+      return mqttBridgeInstance.client || null;
+    } catch (err) {
+      return null;
+    }
+  }
+};
