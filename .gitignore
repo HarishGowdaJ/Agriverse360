@@ -57,3 +57,20 @@ datasets/
 *.exe
 *.bin
 *.dll
+
+# =========================
+# ML models
+# =========================
+*.h5
+*.ckpt
+*.tflite
+*.pt
+*.pkl
+*.joblib
+*.onnx
+
+# =========================
+# TensorFlow checkpoints
+# =========================
+**/variables.data-00000-of-00001
+**/variables.index
