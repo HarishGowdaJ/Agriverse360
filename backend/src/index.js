@@ -5,6 +5,7 @@ const { spawn } = require('child_process');
 const path = require('path');
 const axios = require('axios');
 const mockMLService = require('./mockMLService');
+const { connectDB, disconnectDB } = require('./config/database');
 
 // Load environment variables
 dotenv.config();
@@ -184,6 +185,13 @@ app.get('/health', async (req, res) => {
     health.services.plant_info_ml = 'unknown';
   }
 
+  // Check Database connection
+  try {
+    health.services.database = mongoose.connection.readyState === 1 ? 'connected' : 'disconnected';
+  } catch (error) {
+    health.services.database = 'error';
+  }
+
   // Check Plant Info API (OpenAI/ChatGPT)
   try {
     // Simple check - we don't want to waste API calls
@@ -259,46 +267,63 @@ const plantRoutes = require('./routes/plant');
 app.use('/api', uploadRoutes);
 app.use('/api/plant', plantRoutes);
 
-// Start server
-app.listen(PORT, () => {
-  console.log(`🌱 Agriverse360 Backend Server running on port ${PORT}`);
-  console.log(`📊 Health check: http://localhost:${PORT}/health`);
-  console.log(`📋 Status page: http://localhost:${PORT}/status`);
-  console.log('');
+// Connect to database and start server
+const startServer = async () => {
+  try {
+    // Connect to MongoDB
+    await connectDB();
 
-  // Start ML service
-  console.log('🚀 Initializing ML service...');
-  startMLService();
+    // Start the server
+    app.listen(PORT, () => {
+      console.log(`🌱 Agriverse360 Backend Server running on port ${PORT}`);
+      console.log(`📊 Health check: http://localhost:${PORT}/health`);
+      console.log(`📋 Status page: http://localhost:${PORT}/status`);
+      console.log('');
 
-  // Fallback: If ML service doesn't start within 10 seconds, force start mock service
-  setTimeout(() => {
-    if (!mlServiceProcess) {
-      console.log('⚠️  ML service failed to start, forcing mock service...');
-      startMockMLService();
-    }
-  }, 10000);
+      // Start ML service
+      console.log('🚀 Initializing ML service...');
+      startMLService();
 
-  // Periodic health checks
-  setInterval(async () => {
-    try {
-      const response = await axios.get(`http://localhost:${ML_SERVICE_PORT}/health`, { timeout: 2000 });
-      // ML service is healthy, no need to log every time
-    } catch (error) {
-      console.log('⚠️  ML Service health check failed - service may be restarting...');
-    }
-  }, 30000); // Check every 30 seconds
-});
+      // Fallback: If ML service doesn't start within 10 seconds, force start mock service
+      setTimeout(() => {
+        if (!mlServiceProcess) {
+          console.log('⚠️  ML service failed to start, forcing mock service...');
+          startMockMLService();
+        }
+      }, 10000);
+
+      // Periodic health checks
+      setInterval(async () => {
+        try {
+          const response = await axios.get(`http://localhost:${ML_SERVICE_PORT}/health`, { timeout: 2000 });
+          // ML service is healthy, no need to log every time
+        } catch (error) {
+          console.log('⚠️  ML Service health check failed - service may be restarting...');
+        }
+      }, 30000); // Check every 30 seconds
+    });
+
+  } catch (error) {
+    console.error('❌ Failed to start server:', error.message);
+    process.exit(1);
+  }
+};
+
+// Start the server
+startServer();
 
 // Graceful shutdown
-process.on('SIGINT', () => {
+process.on('SIGINT', async () => {
   console.log('\n🛑 Received SIGINT, shutting down gracefully...');
   stopMLService();
+  await disconnectDB();
   process.exit(0);
 });
 
-process.on('SIGTERM', () => {
+process.on('SIGTERM', async () => {
   console.log('\n🛑 Received SIGTERM, shutting down gracefully...');
   stopMLService();
+  await disconnectDB();
   process.exit(0);
 });
 
